@@ -543,6 +543,125 @@ Names:
 
 Code object的Stack size必须大于等于执行过程中可能的最大Stack size，不然可能会引发解释器崩溃
 
+执行一个函数时，Python有一个block stack，最多可以有[CO_MAXBLOCKS](https://github.com/python/cpython/blob/3.6/Include/code.h#L96)个block，超过会引发block stack overflow。计算Stack size时，比较负责的是和block有关的opcode。
+
+### SETUP_LOOP/POP_BLOCK
+
+[SETUP_LOOP](https://docs.python.org/3.6/library/dis.html#opcode-SETUP_LOOP)会往block stack push一个block，在循环退出时需要[POP_BLOCK](https://docs.python.org/3.6/library/dis.html#opcode-POP_BLOCK)
+
+```pycon
+>>> def f():
+...     while g():
+...         pass
+...
+>>> dis(f)
+  2           0 SETUP_LOOP              10 (to 12)
+        >>    2 LOAD_GLOBAL              0 (g)
+              4 CALL_FUNCTION            0
+              6 POP_JUMP_IF_FALSE       10
+
+  3           8 JUMP_ABSOLUTE            2
+        >>   10 POP_BLOCK
+        >>   12 LOAD_CONST               0 (None)
+             14 RETURN_VALUE
+>>>
+```
+
+如果Stack size大于push block时的Stack size，`POP_BLOCK`会把多出来的都POP掉，比如
+
+```pycon
+>>> from wordcode import asm
+>>> @asm()
+... def f():
+...     LOAD_CONST(1)
+...     SETUP_LOOP.L1
+...     LOAD_CONST(2)
+...     LOAD_CONST(3)
+...     LOAD_CONST(4)
+...     POP_BLOCK()
+...     ().L1
+...     RETURN_VALUE()
+...
+>>> f()
+1
+```
+
+不然，不会改变Stack
+
+```pycon
+>>> @asm()
+... def f():
+...     LOAD_CONST(1)
+...     LOAD_CONST(2)
+...     SETUP_LOOP.L1
+...     POP_TOP()
+...     POP_BLOCK()
+...     ().L1
+...     RETURN_VALUE()
+...
+>>> f()
+1
+```
+
+### SETUP_EXCEPT/POP_EXCEPT/END_FINALLY
+
+```pycon
+>>> def f():
+...     try:
+...         raise Exception
+...     except Exception:
+...         raise
+...     else:
+...         print(1)
+...
+>>> dis(f)
+  2           0 SETUP_EXCEPT             8 (to 10)
+
+  3           2 LOAD_GLOBAL              0 (Exception)
+              4 RAISE_VARARGS            1
+              6 POP_BLOCK
+              8 JUMP_FORWARD            22 (to 32)
+
+  4     >>   10 DUP_TOP
+             12 LOAD_GLOBAL              0 (Exception)
+             14 COMPARE_OP              10 (exception match)
+             16 POP_JUMP_IF_FALSE       30
+             18 POP_TOP
+             20 POP_TOP
+             22 POP_TOP
+
+  5          24 RAISE_VARARGS            0
+             26 POP_EXCEPT
+             28 JUMP_FORWARD            10 (to 40)
+        >>   30 END_FINALLY
+
+  7     >>   32 LOAD_GLOBAL              1 (print)
+             34 LOAD_CONST               1 (1)
+             36 CALL_FUNCTION            1
+             38 POP_TOP
+        >>   40 LOAD_CONST               0 (None)
+             42 RETURN_VALUE
+```
+
+值得注意的是，catch异常本身不会减少block数。假如会减少block数，以下代码会引发block stack underflow。
+
+```pycon
+>>> @asm()
+... def f():
+...     SETUP_EXCEPT.L1
+...     LOAD_GLOBAL(Exception)
+...     RAISE_VARARGS(1)
+...     ().L1
+...     POP_BLOCK()
+...     LOAD_CONST(1)
+...     RETURN_VALUE()
+...
+>>> f()
+1
+```
+
+
+
 ## 生成 pyc 文件
 
 [importlib._bootstrap_external._code_to_bytecode](https://github.com/python/cpython/blob/3.6/Lib/importlib/_bootstrap_external.py#L497)
